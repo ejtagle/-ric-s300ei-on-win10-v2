@@ -17,6 +17,17 @@ typedef struct _DEVICE_EXTENSION {
 	PPARALLEL_QUERY_WAITERS_ROUTINE QueryNumWaiters;    // callback to query number of waiters for port allocation
 	PVOID                           PortContext;        // context for callbacks to ParPort device
 
+	PHYSICAL_ADDRESS                OriginalEcpController;
+	PUCHAR                          EcpController;
+	ULONG                           SpanOfEcpController;
+	PHYSICAL_ADDRESS                EppControllerPhysicalAddress;
+	ULONG                           SpanOfEppController;
+	ULONG                           HardwareCapabilities;
+	PPARALLEL_SET_CHIP_MODE         TrySetChipMode;		// Callback to set chip mode
+	PPARALLEL_CLEAR_CHIP_MODE       ClearChipMode;		// Callback to clear chip mode
+	PVOID                           PnPContext;
+	UCHAR                           CurrentMode;
+
 	// Scanner access
 	UCHAR                           LineReadMode;		// Line Read Mode
 } DEVICE_EXTENSION, * PDEVICE_EXTENSION;
@@ -94,6 +105,60 @@ GICParDispatchOpen(
 			IoCompleteRequest(Irp, IO_NO_INCREMENT);
 			return STATUS_ADAPTER_HARDWARE_ERROR;
 		}
+
+		// If dealing with an ECP port
+		if (pDevExt->SpanOfEcpController >= ECP_SPAN) {
+			
+			// If port supports EPP/EPP32 mode, try to switch to it
+			if ((pDevExt->HardwareCapabilities & PPT_EPP_PRESENT) != 0 || (pDevExt->HardwareCapabilities & PPT_EPP_32_PRESENT) != 0) {
+
+				// We probably have a controllable ECP port. Switch it to EPP mode
+				if (pDevExt->ClearChipMode)
+					if (pDevExt->ClearChipMode(pDevExt->PnPContext, pDevExt->CurrentMode) == STATUS_SUCCESS)
+						pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+
+				if (pDevExt->TrySetChipMode)
+					if (pDevExt->TrySetChipMode(pDevExt->PnPContext, HW_MODE_EPP) == STATUS_SUCCESS)
+						pDevExt->CurrentMode = HW_MODE_EPP;
+				
+				// Switch port to EPP mode if possible
+				PUCHAR ecpBaseAddr = (PUCHAR) pDevExt->OriginalEcpController.QuadPart;
+				WRITE_PORT_UCHAR(ecpBaseAddr + 2, ECR_EPP_PIO_MODE);
+			}
+			else {
+				if ((pDevExt->HardwareCapabilities & PPT_BYTE_PRESENT) != 0) {
+
+					// We probably have a controllable ECP port. Switch it to BYTE mode
+					if (pDevExt->ClearChipMode)
+						if (pDevExt->ClearChipMode(pDevExt->PnPContext, pDevExt->CurrentMode) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+
+					if (pDevExt->TrySetChipMode)
+						if (pDevExt->TrySetChipMode(pDevExt->PnPContext, HW_MODE_PS2) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_PS2;
+
+					// Switch port to BYTE mode if possible
+					PUCHAR ecpBaseAddr = (PUCHAR)pDevExt->OriginalEcpController.QuadPart;
+					WRITE_PORT_UCHAR(ecpBaseAddr + 2, ECR_BYTE_PIO_MODE);
+				}
+				else {
+
+					// We probably have a controllable ECP port. Switch it to SPP mode
+					if (pDevExt->ClearChipMode)
+						if (pDevExt->ClearChipMode(pDevExt->PnPContext, pDevExt->CurrentMode) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+
+					if (pDevExt->TrySetChipMode)
+						if (pDevExt->TrySetChipMode(pDevExt->PnPContext, HW_MODE_COMPATIBILITY) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+
+					// Switch port to SPP mode if possible
+					PUCHAR ecpBaseAddr = (PUCHAR)pDevExt->OriginalEcpController.QuadPart;
+					WRITE_PORT_UCHAR(ecpBaseAddr + 2, ECR_SPP_MODE);
+
+				}
+			}	
+		}
 	}
 
 	Irp->IoStatus.Information = 0;
@@ -170,58 +235,80 @@ GICParDispatchRead(
 		switch (pDevExt->LineReadMode) {
 		case 1: {
 			// SPP mode
-			PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
+			PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 			ULONG count = irpStack->Parameters.Read.Length;
 			Information = count;
 			PUCHAR dst = currentAddress;
 
-			WRITE_PORT_UCHAR(addr, 0xFF);
+			WRITE_PORT_UCHAR(baseAddr, 0xFF);
 
-			UCHAR orgCtl = READ_PORT_UCHAR(addr + 2);
+			UCHAR orgCtl = READ_PORT_UCHAR(baseAddr + 2);
 			do {
-				WRITE_PORT_UCHAR(addr + 2, orgCtl | (0x2 | 0x8));
-				UCHAR rd1 = READ_PORT_UCHAR(addr + 1);
-				WRITE_PORT_UCHAR(addr + 2, orgCtl & (~0x8));
-				UCHAR rd2 = READ_PORT_UCHAR(addr + 1);
-				WRITE_PORT_UCHAR(addr + 2, orgCtl & (~0x2));
+				WRITE_PORT_UCHAR(baseAddr + 2, orgCtl | (0x2 | 0x8));
+				UCHAR rd1 = READ_PORT_UCHAR(baseAddr + 1);
+				WRITE_PORT_UCHAR(baseAddr + 2, orgCtl & (~0x8));
+				UCHAR rd2 = READ_PORT_UCHAR(baseAddr + 1);
+				WRITE_PORT_UCHAR(baseAddr + 2, orgCtl & (~0x2));
 				*dst++ = (rd2 >> 4) | (rd1 & 0xF0);
 			} while (--count);
 			break;
 		}
 		case 2: {
 			// PS2 mode
-			PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
+			PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 			ULONG count = irpStack->Parameters.Read.Length;
 			Information = count;
 			PUCHAR dst = currentAddress;
 
 			// Enable input mode
-			UCHAR v = READ_PORT_UCHAR(addr + 2);
-			WRITE_PORT_UCHAR(addr + 2, v | 0x20);
+			UCHAR v = READ_PORT_UCHAR(baseAddr + 2);
+			WRITE_PORT_UCHAR(baseAddr + 2, v | 0x20);
 
 			// Read each byte
-			UCHAR orgCtl = READ_PORT_UCHAR(addr + 2);
+			UCHAR orgCtl = READ_PORT_UCHAR(baseAddr + 2);
 			do {
-				WRITE_PORT_UCHAR(addr + 2, orgCtl | 0x02);
-				*dst++ = READ_PORT_UCHAR(addr);
-				WRITE_PORT_UCHAR(addr + 2, orgCtl & (~0x02));
+				WRITE_PORT_UCHAR(baseAddr + 2, orgCtl | 0x02);
+				*dst++ = READ_PORT_UCHAR(baseAddr);
+				WRITE_PORT_UCHAR(baseAddr + 2, orgCtl & (~0x02));
 			} while (--count);
 
 			// Disable input mode
-			v = READ_PORT_UCHAR(addr + 2);
-			WRITE_PORT_UCHAR(addr + 2, v & (~0x20));
+			v = READ_PORT_UCHAR(baseAddr + 2);
+			WRITE_PORT_UCHAR(baseAddr + 2, v & (~0x20));
 
 			break;
 		}
 		case 3: {
 			// EPP mode
-			PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
+			PUCHAR eppBaseAddr = (pDevExt->SpanOfEppController > 0 && pDevExt->EppControllerPhysicalAddress.QuadPart != 0)
+				? (PUCHAR)pDevExt->EppControllerPhysicalAddress.QuadPart
+				: (PUCHAR)pDevExt->OriginalController.QuadPart + 4;
 			ULONG count = irpStack->Parameters.Read.Length;
 			Information = count;
 			PUCHAR dst = currentAddress;
-			do {
-				*dst++ = READ_PORT_UCHAR(addr + 4);
-			} while (--count);
+
+			// Try to do 32bit io, if parallel port allows it
+			if (pDevExt->CurrentMode == HW_MODE_EPP && (pDevExt->HardwareCapabilities & PPT_EPP_32_PRESENT) != 0) {
+				while (count >= 4) {
+					*((PULONG)dst) = READ_PORT_ULONG((PULONG)eppBaseAddr);
+					dst += 4;
+					count -= 4;
+				}
+				while (count >= 2) {
+					*((PUSHORT)dst) = READ_PORT_USHORT((PUSHORT)eppBaseAddr);
+					dst += 2;
+					count -= 2;
+				}
+				while (count >= 1) {
+					*dst++ = READ_PORT_UCHAR((PUCHAR)eppBaseAddr);
+					count -= 1;
+				}
+			}
+			else {
+				do {
+					*dst++ = READ_PORT_UCHAR(eppBaseAddr);
+				} while (--count);
+			}
 
 			break;
 		}
@@ -371,8 +458,8 @@ GICParDispatchIoCtl(
 			if (outBuffersize != 1) {
 				Status = STATUS_INVALID_PARAMETER;
 			} else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(addr);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(baseAddr);
 				Information = 1;
 			}
 			break;
@@ -381,8 +468,8 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(addr+1);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(baseAddr+1);
 				Information = 1;
 			}
 			break;
@@ -391,8 +478,8 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(addr+2);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(baseAddr+2);
 				Information = 1;
 			}
 			break;
@@ -401,8 +488,8 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(addr+3);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(baseAddr+3);
 				Information = 1;
 			}
 			break;
@@ -411,8 +498,11 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(addr+4);
+				PUCHAR eppBaseAddr = (pDevExt->SpanOfEppController > 0 && pDevExt->EppControllerPhysicalAddress.QuadPart != 0)
+					? (PUCHAR)pDevExt->EppControllerPhysicalAddress.QuadPart
+					: (PUCHAR)pDevExt->OriginalController.QuadPart + 4;
+
+				((PUCHAR)(CtrlBuff))[0] = READ_PORT_UCHAR(eppBaseAddr);
 				Information = 1;
 			}
 			break;
@@ -421,8 +511,8 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				WRITE_PORT_UCHAR(addr, ((PUCHAR)(CtrlBuff))[0]);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				WRITE_PORT_UCHAR(baseAddr, ((PUCHAR)(CtrlBuff))[0]);
 			}
 			break;
 		case IOCTL_WRITE_STATUS      :
@@ -430,8 +520,8 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				WRITE_PORT_UCHAR(addr+1, ((PUCHAR)(CtrlBuff))[0]);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				WRITE_PORT_UCHAR(baseAddr+1, ((PUCHAR)(CtrlBuff))[0]);
 			}
 			break;
 		case IOCTL_WRITE_CONTROL     :
@@ -439,8 +529,8 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				WRITE_PORT_UCHAR(addr+2, ((PUCHAR)(CtrlBuff))[0]);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				WRITE_PORT_UCHAR(baseAddr+2, ((PUCHAR)(CtrlBuff))[0]);
 			}
 			break;
 		case IOCTL_WRITE_EPP_ADDRESS :
@@ -448,8 +538,8 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				WRITE_PORT_UCHAR(addr+3, ((PUCHAR)(CtrlBuff))[0]);
+				PUCHAR baseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
+				WRITE_PORT_UCHAR(baseAddr+3, ((PUCHAR)(CtrlBuff))[0]);
 			}
 			break;
 		case IOCTL_WRITE_EPP_DATA    :
@@ -457,8 +547,11 @@ GICParDispatchIoCtl(
 				Status = STATUS_INVALID_PARAMETER;
 			}
 			else {
-				PUCHAR addr = (PUCHAR)(pDevExt->OriginalController.LowPart & 0xFFFF);
-				WRITE_PORT_UCHAR(addr+4, ((PUCHAR)(CtrlBuff))[0]);
+				PUCHAR eppBaseAddr = (pDevExt->SpanOfEppController > 0 && pDevExt->EppControllerPhysicalAddress.QuadPart != 0)
+					? (PUCHAR)pDevExt->EppControllerPhysicalAddress.QuadPart
+					: (PUCHAR)pDevExt->OriginalController.QuadPart + 4;
+
+				WRITE_PORT_UCHAR(eppBaseAddr, ((PUCHAR)(CtrlBuff))[0]);
 			}
 			break;
 		case IOCTL_SET_READLINE_MODE :
@@ -700,21 +793,19 @@ GICParGetPortInfoFromPortDevice(
 	KEVENT                      event;
 	PIRP                        irp;
 	PARALLEL_PORT_INFORMATION   portInfo;
+	PARALLEL_PNP_INFORMATION	pnpInfo;
 	IO_STATUS_BLOCK             ioStatus;
 	NTSTATUS                    status;
 
 	/////////////////////////////////////////////////////////////////////////
 	// Get parallel port information
-
 	KeInitializeEvent(&event, NotificationEvent, FALSE);
-
 	irp = IoBuildDeviceIoControlRequest(
 		IOCTL_INTERNAL_GET_PARALLEL_PORT_INFO,
 		pDevExt->PortDeviceObject,
 		NULL, 0, &portInfo,
 		sizeof(PARALLEL_PORT_INFORMATION),
 		TRUE, &event, &ioStatus);
-
 	if (!irp)
 	{
 		return STATUS_INSUFFICIENT_RESOURCES;
@@ -732,12 +823,51 @@ GICParGetPortInfoFromPortDevice(
 		return status;
 	}
 
+	/////////////////////////////////////////////////////////////////////////
+	// Get parallel PNP port information
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+	irp = IoBuildDeviceIoControlRequest(
+		IOCTL_INTERNAL_GET_PARALLEL_PNP_INFO,
+		pDevExt->PortDeviceObject,
+		NULL, 0, &pnpInfo,
+		sizeof(PARALLEL_PORT_INFORMATION),
+		TRUE, &event, &ioStatus);
+	if (!irp)
+	{
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	status = IoCallDriver(pDevExt->PortDeviceObject, irp);
+	if (!NT_SUCCESS(status))
+	{
+		return status;
+	}
+
+	status = KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+	if (!NT_SUCCESS(status))
+	{
+		return status;
+	}
+
+	// Store SPP mode info
 	pDevExt->OriginalController = portInfo.OriginalController;
 	pDevExt->Controller = portInfo.Controller;
 	pDevExt->SpanOfController = portInfo.SpanOfController;
 	pDevExt->FreePort = portInfo.FreePort;
 	pDevExt->TryAllocatePort = portInfo.TryAllocatePort;
 	pDevExt->PortContext = portInfo.Context;
+
+	// Store ECP mode info
+	pDevExt->OriginalEcpController = pnpInfo.OriginalEcpController;
+	pDevExt->EcpController = pnpInfo.EcpController;
+	pDevExt->SpanOfEcpController = pnpInfo.SpanOfEcpController;
+	pDevExt->EppControllerPhysicalAddress = pnpInfo.EppControllerPhysicalAddress;
+	pDevExt->SpanOfEppController = pnpInfo.SpanOfEppController;
+	pDevExt->HardwareCapabilities = pnpInfo.HardwareCapabilities; // PPT_BYTE_PRESENT, PPT_ECP_PRESENT, PPT_EPP_32_PRESENT, PPT_EPP_PRESENT, PT_NO_HARDWARE_PRESENT
+	pDevExt->TrySetChipMode = pnpInfo.TrySetChipMode;		// Callback to set chip mode
+	pDevExt->ClearChipMode = pnpInfo.ClearChipMode;		// Callback to clear chip mode
+	pDevExt->PnPContext = pnpInfo.Context;
+	pDevExt->CurrentMode = (UCHAR)pnpInfo.CurrentMode;
 
 	// Check register span
 	if (pDevExt->SpanOfController < GICPAR_REGISTER_SPAN)
