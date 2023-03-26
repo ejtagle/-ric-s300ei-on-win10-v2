@@ -1,0 +1,9 @@
+[LMsection]
+LMparam = a5, 5a, f4, 02, 00, 00, 10, 00
+
+[EXsection]
+EXparam = 70, 94
+
+[Qsection]
+Qparam = 1.3
+
