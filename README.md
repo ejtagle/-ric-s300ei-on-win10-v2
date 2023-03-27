@@ -4,7 +4,12 @@ What is does is to allow parallel port access to the original WinNT driver, so t
 This files under Output must be copied to 
 c:\Windows\twain_32\
 
-Also, you need to install the test certificate under root authority (Gicpar.cer)
+Then reboot, disabling Driver Signature enforcement
+
+Also, you need to install the test certificate Gicpar.cer to
+  Trusted Publishers (Editores de Confianza)
+  Trusted Root Certification Authorities (Entidades de Certificación Raiz de Confianza)
+
 Also, you need to run (as administrator) install.bat to install the required new driver.
 
 That is all

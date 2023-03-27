@@ -7,7 +7,7 @@ Signature="$WINDOWS NT$"
 Class=System
 ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider=TS
-DriverVer = 03/26/2023,12.49.11.91
+DriverVer = 03/26/2023,21.51.8.296
 CatalogFile=GICPar.cat
 PnpLockdown=1
 
