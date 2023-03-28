@@ -712,6 +712,7 @@ GICParDispatchRead(
 
 			// Try to do 32bit io, if parallel port allows it
 			if (pDevExt->CurrentMode == HW_MODE_EPP && (pDevExt->HardwareCapabilities & PPT_EPP_32_PRESENT) != 0) {
+#if 0
 				while (count >= 4) {
 					*((PULONG)dst) = READ_PORT_ULONG((PULONG)eppBaseAddr);
 					dst += 4;
@@ -726,11 +727,33 @@ GICParDispatchRead(
 					*dst++ = READ_PORT_UCHAR((PUCHAR)eppBaseAddr);
 					count -= 1;
 				}
+#else
+				if (count >= 4) {
+					READ_PORT_BUFFER_ULONG((PULONG)eppBaseAddr, (PULONG)dst, count >> 2);
+					dst += count & 0xFFFFFFFCUL;
+					count &= 3;
+				}
+				if (count >= 2) {
+					READ_PORT_BUFFER_USHORT((PUSHORT)eppBaseAddr, (PUSHORT)dst, count >> 1);
+					dst += count & 0xFFFFFFFEUL;
+					count &= 1;
+				}
+				if (count >= 1) {
+					READ_PORT_BUFFER_UCHAR((PUCHAR)eppBaseAddr, (PUCHAR)dst, count);
+					dst += count;
+					count = 0;
+				}
+#endif
 			}
 			else {
+#if 0
 				do {
 					*dst++ = READ_PORT_UCHAR(eppBaseAddr);
 				} while (--count);
+#else
+				// Get the byte string as fast as possible
+				READ_PORT_BUFFER_UCHAR(eppBaseAddr, dst, count);
+#endif
 			}
 
 			break;
