@@ -4,6 +4,6 @@
     <TestCertificate>CN="WDKTestCert Eduardo Jose Tagle,133242830563124188" | 0398B1BFC50AB3DBADD466BA29F5FAB361F22233</TestCertificate>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <TestCertificate>CN="WDKTestCert Eduardo Jose Tagle,133242830746896391" | 67A85903355A5472C12C51FE5AB41551E61A4E13</TestCertificate>
+    <TestCertificate>CN="WDKTestCert Eduardo José Tagle,132478968011395918" | 9F508EB51B805258D974EE669CA7B9C1F8A760D1</TestCertificate>
   </PropertyGroup>
 </Project>
