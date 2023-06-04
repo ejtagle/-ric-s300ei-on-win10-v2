@@ -1,12 +1,6 @@
 #include "ntddk.h"
 #include "parallel.h"
 
-#define RW_BARRIER() \
-	do { \
-		KeStallExecutionProcessor(1); \
-		KeMemoryBarrier(); \
-	} while(0)
-
 // Debugging Aids
 //#define ENABLE_DEBUGGING        1
 #define LOG_TOFILE				1									/* Used to log ALL debug messages to a file (don't use it with a debugger) */
@@ -473,7 +467,6 @@ static UCHAR PortReadDATA(PDEVICE_EXTENSION pDevExt)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	UCHAR status = READ_PORT_UCHAR(portBaseAddr);
-	RW_BARRIER();
 	return status;
 }
 
@@ -481,14 +474,12 @@ static void PortWriteDATA(PDEVICE_EXTENSION pDevExt, UCHAR value)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	WRITE_PORT_UCHAR(portBaseAddr, value);
-	RW_BARRIER();
 }
 
 static UCHAR PortReadSTATUS(PDEVICE_EXTENSION pDevExt)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	UCHAR status = READ_PORT_UCHAR(portBaseAddr+1);
-	RW_BARRIER();
 	return status;
 }
 
@@ -496,14 +487,12 @@ static void PortWriteSTATUS(PDEVICE_EXTENSION pDevExt, UCHAR value)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	WRITE_PORT_UCHAR(portBaseAddr+1,value);
-	RW_BARRIER();
 }
 
 static UCHAR PortReadCONTROL(PDEVICE_EXTENSION pDevExt)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	UCHAR status = READ_PORT_UCHAR(portBaseAddr + 2);
-	RW_BARRIER();
 	return status;
 }
 
@@ -511,22 +500,23 @@ static void PortWriteCONTROL(PDEVICE_EXTENSION pDevExt, UCHAR value)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	WRITE_PORT_UCHAR(portBaseAddr + 2, value);
-	RW_BARRIER();
 }
 
 static UCHAR PortReadECONTROL(PDEVICE_EXTENSION pDevExt)
 {
 	PUCHAR portEcpBaseAddr = (PUCHAR)pDevExt->OriginalEcpController.QuadPart;
+	if (!portEcpBaseAddr)
+		return 0x00;
 	UCHAR status = READ_PORT_UCHAR(portEcpBaseAddr + 2);
-	RW_BARRIER();
 	return status;
 }
 
 static void PortWriteECONTROL(PDEVICE_EXTENSION pDevExt, UCHAR value)
 {
 	PUCHAR portEcpBaseAddr = (PUCHAR)pDevExt->OriginalEcpController.QuadPart;
+	if (!portEcpBaseAddr)
+		return;
 	WRITE_PORT_UCHAR(portEcpBaseAddr + 2, value);
-	RW_BARRIER();
 }
 
 /*
@@ -554,7 +544,6 @@ static UCHAR PortReadEPPADDR(PDEVICE_EXTENSION pDevExt)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	UCHAR value = READ_PORT_UCHAR(portBaseAddr + 3);
-	RW_BARRIER();
 	ClearEPPTimeout(pDevExt);
 	return value;
 }
@@ -563,7 +552,6 @@ static int PortWriteEPPADDR(PDEVICE_EXTENSION pDevExt, UCHAR value)
 {
 	PUCHAR portBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
 	WRITE_PORT_UCHAR(portBaseAddr + 3, value);
-	RW_BARRIER();
 	return ClearEPPTimeout(pDevExt);
 }
 
@@ -574,7 +562,6 @@ static UCHAR PortReadEPPDATA(PDEVICE_EXTENSION pDevExt)
 		: (PUCHAR)pDevExt->OriginalController.QuadPart + 4;
 
 	UCHAR value = READ_PORT_UCHAR(addr);
-	RW_BARRIER();
 	ClearEPPTimeout(pDevExt);
 	return value;
 }
@@ -586,7 +573,6 @@ static int PortWriteEPPDATA(PDEVICE_EXTENSION pDevExt, UCHAR value)
 		: (PUCHAR)pDevExt->OriginalController.QuadPart + 4;
 
 	WRITE_PORT_UCHAR(addr, value);
-	RW_BARRIER();
 	return ClearEPPTimeout(pDevExt);
 }
 
@@ -671,7 +657,7 @@ GICParDispatchOpen(
 
 		// Clear an eventual EPP timeout. Some chips do not even respond to SPP if an EPP timeout has happened
 		ClearEPPTimeout(pDevExt);
-#if 1
+#if 0
 		// If dealing with an ECP port
 		if (pDevExt->SpanOfEcpController >= ECP_SPAN) {
 			LOG(("ECP port: Trying to switch it to EPP"));
@@ -769,8 +755,17 @@ GICParDispatchOpen(
 						// Switch port to BYTE mode if possible
 						PortWriteECONTROL(pDevExt, ECR_BYTE_PIO_MODE);
 
-						// No mixed ECPEPP mode
+						// Try to detect if EPP mode is available
 						pDevExt->MixedECPEPPMode = FALSE;
+						if (IsEPPSupported(pDevExt)) {
+							LOG(("Pure EPP mode is available"));
+						}
+						else {
+							if (IsECPEPPSupported(pDevExt)) {
+								LOG(("Mixed ECP-EPP mode is available"));
+								pDevExt->MixedECPEPPMode = TRUE;
+							}
+						}
 					}
 					else {
 						LOG(("Parallel port: SPP Capable"));
@@ -820,6 +815,18 @@ GICParDispatchOpen(
 
 			// Switch port to BYTE mode if possible
 			PortWriteECONTROL(pDevExt, ECR_BYTE_PIO_MODE);
+
+			// Try to detect if EPP mode is available
+			pDevExt->MixedECPEPPMode = FALSE;
+			if (IsEPPSupported(pDevExt)) {
+				LOG(("Pure EPP mode is available"));
+			}
+			else {
+				if (IsECPEPPSupported(pDevExt)) {
+					LOG(("Mixed ECP-EPP mode is available"));
+					pDevExt->MixedECPEPPMode = TRUE;
+				}
+			}
 		}
 		else {
 			LOG(("Parallel port: SPP Capable"));
@@ -841,6 +848,9 @@ GICParDispatchOpen(
 
 			// Switch port to SPP mode if possible
 			PortWriteECONTROL(pDevExt, ECR_SPP_MODE);
+
+			// No EPP mode available
+			pDevExt->MixedECPEPPMode = FALSE;
 		}
 #endif
 	}
@@ -925,8 +935,8 @@ GICParDispatchRead(
 		case 1: {
 			// SPP mode
 			PUCHAR dataBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
-			PUCHAR ctrlBaseAddr = dataBaseAddr + 1;
-			PUCHAR statusBaseAddr = dataBaseAddr + 2;
+			PUCHAR statusBaseAddr = dataBaseAddr + 1;
+			PUCHAR ctrlBaseAddr = dataBaseAddr + 2;
 
 			ULONG count = irpStack->Parameters.Read.Length;
 			LOG(("SPP readline: base: 0x%08p, count: %d", dataBaseAddr, count));
@@ -949,7 +959,7 @@ GICParDispatchRead(
 		case 2: {
 			// PS2 mode
 			PUCHAR dataBaseAddr = (PUCHAR)pDevExt->OriginalController.QuadPart;
-			PUCHAR ctrlBaseAddr = dataBaseAddr + 1;
+			PUCHAR ctrlBaseAddr = dataBaseAddr + 2;
 			ULONG count = irpStack->Parameters.Read.Length;
 			LOG(("PS2 readline: baseAddress: 0x%08p, count: %d", dataBaseAddr, count));
 			Information = count;
@@ -961,10 +971,12 @@ GICParDispatchRead(
 
 			// Read each byte
 			UCHAR orgCtl = READ_PORT_UCHAR(ctrlBaseAddr);
+			UCHAR orgCtlOr02 = orgCtl | 0x02;
+			UCHAR orgCtlAndNot02 = orgCtl & (~0x02);
 			do {
-				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtl | 0x02);
+				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtlOr02);
 				*dst++ = READ_PORT_UCHAR(dataBaseAddr);
-				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtl & (~0x02));
+				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtlAndNot02);
 			} while (--count);
 
 			// Disable input mode
@@ -1047,7 +1059,6 @@ GICParDispatchRead(
 				// Get the byte string as fast as possible
 				READ_PORT_BUFFER_UCHAR(eppBaseAddr, dst, count);
 				ClearEPPTimeout(pDevExt);
-				RW_BARRIER();
 #endif
 
 			}
@@ -1169,6 +1180,7 @@ GICParDispatchShutdown(
 #define IOCTL_WRITE_EPP_ADDRESS CTL_CODE(0x8000,10, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_WRITE_EPP_DATA    CTL_CODE(0x8000,11, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_SET_READLINE_MODE CTL_CODE(0x8000,12, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_SET_PORT_MODE     CTL_CODE(0x8000,14, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 
 NTSTATUS 
@@ -1413,6 +1425,109 @@ GICParDispatchIoCtl(
 				LOG(("IOCTL_SET_READLINE_MODE: write %d", ((PUCHAR)(CtrlBuff))[0]));
 			}
 			break;
+		case IOCTL_SET_PORT_MODE:
+			if (inBuffersize != 1) {
+				LOG(("IOCTL_SET_PORT_MODE: Invalid parameter inBuffersize:%d", inBuffersize));
+				Status = STATUS_INVALID_PARAMETER;
+			}
+			else {
+				LOG(("IOCTL_SET_READLINE_MODE: write %d", ((PUCHAR)(CtrlBuff))[0]));
+				switch (((PUCHAR)(CtrlBuff))[0]) {
+				case 1: // SPP mode
+					LOG(("Parallel port: Switched to SPP mode"));
+					if (pDevExt->ClearChipMode)
+						if (pDevExt->ClearChipMode(pDevExt->PnPContext, pDevExt->CurrentMode) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+						else {
+							LOG(("ERROR: Unable to ClearChipMode"));
+						}
+
+					if (pDevExt->TrySetChipMode)
+						if (pDevExt->TrySetChipMode(pDevExt->PnPContext, HW_MODE_COMPATIBILITY) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+						else {
+							LOG(("ERROR: Unable to TrySetChipMode"));
+						}
+
+					// Switch port to SPP mode if possible
+					PortWriteECONTROL(pDevExt, ECR_SPP_MODE);
+
+					// No EPP mode
+					pDevExt->MixedECPEPPMode = FALSE;
+					break;
+
+				case 2: // PS2 mode
+					LOG(("Parallel port: Switched to PS2 mode"));
+
+					// We probably have a controllable ECP port. Switch it to BYTE mode
+					if (pDevExt->ClearChipMode)
+						if (pDevExt->ClearChipMode(pDevExt->PnPContext, pDevExt->CurrentMode) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+						else {
+							LOG(("ERROR: Unable to ClearChipMode"));
+						}
+
+					if (pDevExt->TrySetChipMode)
+						if (pDevExt->TrySetChipMode(pDevExt->PnPContext, HW_MODE_PS2) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_PS2;
+						else {
+							LOG(("ERROR: Unable to TrySetChipMode"));
+						}
+
+					// Switch port to BYTE mode if possible
+					PortWriteECONTROL(pDevExt, ECR_BYTE_PIO_MODE);
+
+					// Try to detect if EPP mode is available
+					pDevExt->MixedECPEPPMode = FALSE;
+					if (IsEPPSupported(pDevExt)) {
+						LOG(("Pure EPP mode is available"));
+					}
+					else {
+						if (IsECPEPPSupported(pDevExt)) {
+							LOG(("Mixed ECP-EPP mode is available"));
+							pDevExt->MixedECPEPPMode = TRUE;
+						}
+					}
+					break;
+
+				case 3:
+					LOG(("Parallel port: Switched to EPP mode"));
+
+					// We probably have a controllable ECP port. Switch it to EPP mode
+					if (pDevExt->ClearChipMode)
+						if (pDevExt->ClearChipMode(pDevExt->PnPContext, pDevExt->CurrentMode) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_COMPATIBILITY;
+						else {
+							LOG(("ERROR: Unable to ClearChipMode"));
+						}
+
+					if (pDevExt->TrySetChipMode)
+						if (pDevExt->TrySetChipMode(pDevExt->PnPContext, HW_MODE_EPP) == STATUS_SUCCESS)
+							pDevExt->CurrentMode = HW_MODE_EPP;
+						else {
+							LOG(("ERROR: Unable to TrySetChipMode"));
+						}
+
+					// Switch port to EPP mode if possible
+					PortWriteECONTROL(pDevExt, ECR_EPP_PIO_MODE);
+
+					// Try to detect if EPP mode is available
+					pDevExt->MixedECPEPPMode = FALSE;
+					if (IsEPPSupported(pDevExt)) {
+						LOG(("Pure EPP mode is available"));
+					}
+					else {
+						if (IsECPEPPSupported(pDevExt)) {
+							LOG(("Mixed ECP-EPP mode is available"));
+							pDevExt->MixedECPEPPMode = TRUE;
+						}
+					}
+					break;
+				}
+				
+			}
+			break;
+
 	}
 
 	Irp->IoStatus.Information = Information;
