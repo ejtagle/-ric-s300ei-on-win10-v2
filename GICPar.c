@@ -1,6 +1,16 @@
 #include "ntddk.h"
 #include "parallel.h"
 
+/*
+ nSTROBE	nWRITE		Out		bit0
+ nAUTOFEED	nDATASTB	Out		bit1
+ nSELECTIN	nADDRSTB	Out		bit3
+ nINIT		nRESET		Out		bit2
+ nACK		nINTR		In		bit6
+ BUSY		nWAIT		In		bit7
+
+ */
+
 // Debugging Aids
 //#define ENABLE_DEBUGGING        1
 #define LOG_TOFILE				1									/* Used to log ALL debug messages to a file (don't use it with a debugger) */
@@ -381,7 +391,8 @@ typedef struct _DEVICE_EXTENSION {
 	PDEVICE_OBJECT DeviceObject;
 	ULONG NtDeviceNumber;
 	ULONG PortNumber;
-	BOOLEAN MixedECPEPPMode;							// Mixed ECPEPP mode
+	BOOLEAN MixedECPEPPMode;							// Mixed ECPEPP mode: Supports EPP while in ECP mode
+	BOOLEAN EPPModeWhileInBYTEMode;						// Supports EPP mode while in BYTE mode
 	
 	// Parallel port driver
 	PDEVICE_OBJECT PortDeviceObject;
@@ -657,6 +668,11 @@ GICParDispatchOpen(
 
 		// Clear an eventual EPP timeout. Some chips do not even respond to SPP if an EPP timeout has happened
 		ClearEPPTimeout(pDevExt);
+
+		// By default, no special modes supported
+		pDevExt->MixedECPEPPMode = FALSE;
+		pDevExt->EPPModeWhileInBYTEMode = FALSE;
+
 #if 0
 		// If dealing with an ECP port
 		if (pDevExt->SpanOfEcpController >= ECP_SPAN) {
@@ -686,7 +702,6 @@ GICParDispatchOpen(
 				PortWriteECONTROL(pDevExt, ECR_EPP_PIO_MODE);
 
 				// Try to detect if EPP mode is available
-				pDevExt->MixedECPEPPMode = FALSE;
 				if (IsEPPSupported(pDevExt)) {
 					LOG(("Pure EPP mode is available"));
 				}
@@ -722,7 +737,6 @@ GICParDispatchOpen(
 					PortWriteECONTROL(pDevExt, ECR_EPP_PIO_MODE);
 
 					// Try to detect if EPP mode is available
-					pDevExt->MixedECPEPPMode = FALSE;
 					if (IsEPPSupported(pDevExt)) {
 						LOG(("Pure EPP mode is available"));
 					}
@@ -756,14 +770,15 @@ GICParDispatchOpen(
 						PortWriteECONTROL(pDevExt, ECR_BYTE_PIO_MODE);
 
 						// Try to detect if EPP mode is available
-						pDevExt->MixedECPEPPMode = FALSE;
 						if (IsEPPSupported(pDevExt)) {
 							LOG(("Pure EPP mode is available"));
+							pDevExt->EPPModeWhileInBYTEMode = TRUE;
 						}
 						else {
 							if (IsECPEPPSupported(pDevExt)) {
 								LOG(("Mixed ECP-EPP mode is available"));
 								pDevExt->MixedECPEPPMode = TRUE;
+								pDevExt->EPPModeWhileInBYTEMode = TRUE;
 							}
 						}
 					}
@@ -820,11 +835,13 @@ GICParDispatchOpen(
 			pDevExt->MixedECPEPPMode = FALSE;
 			if (IsEPPSupported(pDevExt)) {
 				LOG(("Pure EPP mode is available"));
+				pDevExt->EPPModeWhileInBYTEMode = TRUE;
 			}
 			else {
 				if (IsECPEPPSupported(pDevExt)) {
 					LOG(("Mixed ECP-EPP mode is available"));
 					pDevExt->MixedECPEPPMode = TRUE;
+					pDevExt->EPPModeWhileInBYTEMode = TRUE;
 				}
 			}
 		}
@@ -947,7 +964,7 @@ GICParDispatchRead(
 			UCHAR orgCtl = READ_PORT_UCHAR(ctrlBaseAddr);
 
 			do {
-				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtl | (0x2 | 0x8));
+				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtl | (0x2 | 0x8)); 
 				UCHAR rd1 = READ_PORT_UCHAR(statusBaseAddr);
 				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtl & (~0x8));
 				UCHAR rd2 = READ_PORT_UCHAR(statusBaseAddr);
@@ -965,23 +982,46 @@ GICParDispatchRead(
 			Information = count;
 			PUCHAR dst = currentAddress;
 
+			if (pDevExt->MixedECPEPPMode) {
+				// Enable EPP mode
+				PortSetMode(pDevExt, ECR_EPP_MODE);
+			}
+
 			// Enable input mode
 			UCHAR v = READ_PORT_UCHAR(ctrlBaseAddr);
 			WRITE_PORT_UCHAR(ctrlBaseAddr, v | 0x20);
 
-			// Read each byte
-			UCHAR orgCtl = READ_PORT_UCHAR(ctrlBaseAddr);
-			UCHAR orgCtlOr02 = orgCtl | 0x02;
-			UCHAR orgCtlAndNot02 = orgCtl & (~0x02);
-			do {
-				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtlOr02);
-				*dst++ = READ_PORT_UCHAR(dataBaseAddr);
-				WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtlAndNot02);
-			} while (--count);
+			if (pDevExt->EPPModeWhileInBYTEMode) {
+
+				// EPP mode is supported while in BYTE mode, try to use it to increase read speed
+				PUCHAR eppBaseAddr = (pDevExt->SpanOfEppController > 0 && pDevExt->EppControllerPhysicalAddress.QuadPart != 0)
+					? (PUCHAR)pDevExt->EppControllerPhysicalAddress.QuadPart
+					: (PUCHAR)pDevExt->OriginalController.QuadPart + 4;
+
+				READ_PORT_BUFFER_UCHAR((PUCHAR)eppBaseAddr, (PUCHAR)dst, count);
+				ClearEPPTimeout(pDevExt);
+			}
+			else {
+				// Read each byte
+				UCHAR orgCtl = READ_PORT_UCHAR(ctrlBaseAddr);
+				UCHAR orgCtlOr02 = orgCtl | 0x02;
+				UCHAR orgCtlAndNot02 = orgCtl & (~0x02);
+				do {
+					WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtlOr02);		// nDATASTB = 0, nWRITE = 1 (means read)
+					*dst++ = READ_PORT_UCHAR(dataBaseAddr);
+					WRITE_PORT_UCHAR(ctrlBaseAddr, orgCtlAndNot02); // nDATASTB = 1
+				} while (--count);
+			}
 
 			// Disable input mode
 			v = READ_PORT_UCHAR(ctrlBaseAddr);
 			WRITE_PORT_UCHAR(ctrlBaseAddr, v & (~0x20));
+
+			if (pDevExt->MixedECPEPPMode) {
+				// Go back to PS2 mode
+				PortSetMode(pDevExt, ECR_BYTE_MODE);
+			}
+
 			break;
 		}
 		case 3: {
