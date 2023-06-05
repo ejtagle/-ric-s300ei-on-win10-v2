@@ -1494,6 +1494,7 @@ GICParDispatchIoCtl(
 
 					// No EPP mode
 					pDevExt->MixedECPEPPMode = FALSE;
+					pDevExt->EPPModeWhileInBYTEMode = FALSE;
 					break;
 
 				case 2: // PS2 mode
@@ -1521,11 +1522,13 @@ GICParDispatchIoCtl(
 					pDevExt->MixedECPEPPMode = FALSE;
 					if (IsEPPSupported(pDevExt)) {
 						LOG(("Pure EPP mode is available"));
+						pDevExt->EPPModeWhileInBYTEMode = TRUE;
 					}
 					else {
 						if (IsECPEPPSupported(pDevExt)) {
 							LOG(("Mixed ECP-EPP mode is available"));
 							pDevExt->MixedECPEPPMode = TRUE;
+							pDevExt->EPPModeWhileInBYTEMode = TRUE;
 						}
 					}
 					break;
